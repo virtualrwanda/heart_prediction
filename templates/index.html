@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clinical Heart Monitor Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@2.2.1/dist/chartjs-plugin-annotation.min.js"></script>
+    <style>
+        body { font-family: 'Courier New', Courier, monospace; }
+        .danger-row { background-color: rgba(239, 68, 68, 0.15) !important; }
+        @keyframes pulse-anim { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+        .pulse { animation: pulse-anim 2s infinite; }
+        .chart-container { position: relative; height: 250px; }
+        .notification-badge td:first-child::before { content: "✉ "; color: #f87171; }
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-track { background: #111; }
+        ::-webkit-scrollbar-thumb { background: #dc2626; border-radius: 3px; }
+    </style>
+</head>
+<body class="min-h-screen bg-[#111827] text-white" style="text-transform: uppercase; letter-spacing: 0.03em;">
+
+    <!-- Navbar -->
+    <nav class="bg-red-700 shadow-lg shadow-red-900/50">
+        <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+            <a href="/" class="text-white font-bold text-lg tracking-widest">Clinical Dashboard</a>
+            <div class="hidden md:flex items-center gap-6">
+                <a href="/"           class="text-white hover:text-red-200 text-xs transition-colors font-bold border-b border-white pb-0.5">Dashboard</a>
+                <a href="/patients"   class="text-red-200 hover:text-white text-xs transition-colors">Patients</a>
+                {% if current_user.role in ('admin',) %}
+                <a href="/caregivers" class="text-red-200 hover:text-white text-xs transition-colors">Caregivers</a>
+                {% endif %}
+                <a href="/devices"    class="text-red-200 hover:text-white text-xs transition-colors">IoT Devices</a>
+                {% if current_user.role == 'admin' %}
+                <a href="/users"      class="text-red-200 hover:text-white text-xs transition-colors">Users</a>
+                {% endif %}
+                <!-- User badge -->
+                <span class="text-red-200 text-xs normal-case border-l border-red-600 pl-4">
+                    {{ current_user.full_name }}
+                    <span class="ml-1 text-xs px-1.5 py-0.5 rounded
+                        {% if current_user.role == 'admin' %}bg-amber-700/60 text-amber-200
+                        {% elif current_user.role == 'doctor' %}bg-cyan-800/60 text-cyan-200
+                        {% else %}bg-emerald-900/60 text-emerald-200{% endif %}">
+                        {{ current_user.role }}
+                    </span>
+                </span>
+                <a href="/logout"
+                   class="bg-white/10 hover:bg-white/20 text-white text-xs px-3 py-1.5 rounded transition-colors">
+                    Logout
+                </a>
+            </div>
+            <button id="mobile-menu-btn" class="md:hidden text-white text-xl">&#9776;</button>
+        </div>
+        <div id="mobile-menu" class="hidden flex-col gap-3 px-4 pb-3 bg-red-800 md:hidden text-sm">
+            <a href="/"           class="text-white">Dashboard</a>
+            <a href="/patients"   class="text-white">Patients</a>
+            {% if current_user.role == 'admin' %}
+            <a href="/caregivers" class="text-white">Caregivers</a>
+            <a href="/users"      class="text-white">Users</a>
+            {% endif %}
+            <a href="/devices"    class="text-white">IoT Devices</a>
+            <a href="/logout"     class="text-white">Logout</a>
+        </div>
+    </nav>
+
+    <div class="max-w-7xl mx-auto px-4 py-6">
+
+        <!-- Header -->
+        <div class="flex flex-col md:flex-row items-center justify-between mb-6">
+            <h1 class="text-2xl md:text-3xl font-bold text-red-400 tracking-widest"
+                style="text-shadow: 0 0 12px rgba(239,68,68,0.6);">
+                Clinical Dashboard
+            </h1>
+            <div class="flex items-center gap-4 mt-3 md:mt-0">
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <div class="relative">
+                        <input type="checkbox" id="autoRefreshToggle" class="sr-only peer" checked>
+                        <div class="w-10 h-5 bg-gray-700 rounded-full peer-checked:bg-red-600 transition-colors"></div>
+                        <div class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform peer-checked:translate-x-5"></div>
+                    </div>
+                    <span class="text-xs text-gray-400">Auto Refresh</span>
+                </label>
+                <span id="nextRefresh" class="text-red-400 text-xs pulse">Next refresh in: 10s</span>
+            </div>
+        </div>
+
+        <!-- Flash Messages -->
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="mb-4 px-4 py-3 rounded border text-sm
+                        {% if category == 'error' %}bg-red-900/40 border-red-600 text-red-300
+                        {% elif category == 'warning' %}bg-yellow-900/40 border-yellow-600 text-yellow-300
+                        {% else %}bg-green-900/40 border-green-600 text-green-300{% endif %}">
+                        {{ message }}
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <!-- ── ML MODEL PREDICTIONS ─────────────────────────────── -->
+        <h2 class="text-sm font-bold text-red-400 tracking-widest mb-3 border-b border-red-900 pb-1">
+            ML Model Predictions &mdash; Latest Reading
+        </h2>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
+
+            <!-- Tachycardia -->
+            <div class="bg-gray-900 border border-red-800 rounded-lg overflow-hidden shadow-md shadow-red-950/40">
+                <div class="bg-red-700 px-4 py-2">
+                    <p class="text-xs font-bold tracking-widest">Tachycardia</p>
+                    <p class="text-xs text-red-200 normal-case">Abnormally fast heart rate</p>
+                </div>
+                <div class="flex flex-col items-center py-5 gap-2">
+                    <span id="tachycardia-badge"
+                          class="px-5 py-2 rounded-full text-xs font-bold bg-gray-700 text-gray-400">
+                        No Data
+                    </span>
+                    <span id="tachycardia-prob" class="text-xs text-gray-500"></span>
+                </div>
+            </div>
+
+            <!-- Hypertrophy -->
+            <div class="bg-gray-900 border border-red-800 rounded-lg overflow-hidden shadow-md shadow-red-950/40">
+                <div class="bg-red-700 px-4 py-2">
+                    <p class="text-xs font-bold tracking-widest">Cardiac Hypertrophy</p>
+                    <p class="text-xs text-red-200 normal-case">Thickened heart muscle</p>
+                </div>
+                <div class="flex flex-col items-center py-5 gap-2">
+                    <span id="hypertrophy-badge"
+                          class="px-5 py-2 rounded-full text-xs font-bold bg-gray-700 text-gray-400">
+                        No Data
+                    </span>
+                    <span id="hypertrophy-prob" class="text-xs text-gray-500"></span>
+                </div>
+            </div>
+
+            <!-- Cholesterol -->
+            <div class="bg-gray-900 border border-red-800 rounded-lg overflow-hidden shadow-md shadow-red-950/40">
+                <div class="bg-red-700 px-4 py-2">
+                    <p class="text-xs font-bold tracking-widest">High Cholesterol</p>
+                    <p class="text-xs text-red-200 normal-case">Elevated cholesterol risk</p>
+                </div>
+                <div class="flex flex-col items-center py-5 gap-2">
+                    <span id="cholesterol-badge"
+                          class="px-5 py-2 rounded-full text-xs font-bold bg-gray-700 text-gray-400">
+                        No Data
+                    </span>
+                    <span id="cholesterol-prob" class="text-xs text-gray-500"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── CHARTS ─────────────────────────────────────────────── -->
+        <h2 class="text-sm font-bold text-red-400 tracking-widest mb-3 border-b border-red-900 pb-1">
+            Vital Trends
+        </h2>
+        <!-- Legend for normal range band -->
+        <div class="flex items-center gap-4 mb-3 text-xs text-gray-400 normal-case">
+            <span class="flex items-center gap-1">
+                <span class="inline-block w-3 h-3 rounded" style="background:rgba(16,185,129,0.25);border:1px solid rgba(16,185,129,0.6)"></span>
+                Normal range
+            </span>
+            <span class="flex items-center gap-1">
+                <span class="inline-block w-6 h-0.5 bg-red-500"></span>
+                Measured value
+            </span>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
+
+            <!-- Heart Rate -->
+            <div class="bg-gray-900 border border-red-800 rounded-lg overflow-hidden shadow-md shadow-red-950/40">
+                <div class="bg-red-700 px-4 py-2 flex justify-between items-center">
+                    <div>
+                        <span class="text-xs font-bold tracking-widest">Heart Rate (BPM)</span>
+                        <span class="ml-2 text-xs text-red-200 normal-case">Normal: 60–100 BPM</span>
+                    </div>
+                    <button class="text-white hover:text-red-200 text-lg leading-none refresh-chart" data-chart="heartRate" title="Refresh">&#8635;</button>
+                </div>
+                <div class="p-4"><div class="chart-container"><canvas id="heartRateChart"></canvas></div></div>
+            </div>
+
+            <!-- Blood Pressure -->
+            <div class="bg-gray-900 border border-red-800 rounded-lg overflow-hidden shadow-md shadow-red-950/40">
+                <div class="bg-red-700 px-4 py-2 flex justify-between items-center">
+                    <div>
+                        <span class="text-xs font-bold tracking-widest">Blood Pressure (mmHg)</span>
+                        <span class="ml-2 text-xs text-red-200 normal-case">Normal: Sys 90–120 / Dia 60–80</span>
+                    </div>
+                    <button class="text-white hover:text-red-200 text-lg leading-none refresh-chart" data-chart="bp" title="Refresh">&#8635;</button>
+                </div>
+                <div class="p-4"><div class="chart-container"><canvas id="bpChart"></canvas></div></div>
+            </div>
+
+            <!-- SpO2 -->
+            <div class="bg-gray-900 border border-red-800 rounded-lg overflow-hidden shadow-md shadow-red-950/40">
+                <div class="bg-red-700 px-4 py-2 flex justify-between items-center">
+                    <div>
+                        <span class="text-xs font-bold tracking-widest">SpO2 (%)</span>
+                        <span class="ml-2 text-xs text-red-200 normal-case">Normal: 95–100% &nbsp;|&nbsp; Alert: &lt;92%</span>
+                    </div>
+                    <button class="text-white hover:text-red-200 text-lg leading-none refresh-chart" data-chart="spo2" title="Refresh">&#8635;</button>
+                </div>
+                <div class="p-4"><div class="chart-container"><canvas id="spo2Chart"></canvas></div></div>
+            </div>
+
+            <!-- Body Temperature -->
+            <div class="bg-gray-900 border border-red-800 rounded-lg overflow-hidden shadow-md shadow-red-950/40">
+                <div class="bg-red-700 px-4 py-2 flex justify-between items-center">
+                    <div>
+                        <span class="text-xs font-bold tracking-widest">Body Temperature (°C)</span>
+                        <span class="ml-2 text-xs text-red-200 normal-case">Normal: 36.1–37.2°C</span>
+                    </div>
+                    <button class="text-white hover:text-red-200 text-lg leading-none refresh-chart" data-chart="temp" title="Refresh">&#8635;</button>
+                </div>
+                <div class="p-4"><div class="chart-container"><canvas id="tempChart"></canvas></div></div>
+            </div>
+
+        </div>
+
+        <!-- ── RECENT ALERTS TABLE ────────────────────────────────── -->
+        <h2 class="text-sm font-bold text-red-400 tracking-widest mb-3 border-b border-red-900 pb-1">
+            Recent Alerts
+        </h2>
+        <div class="overflow-x-auto mb-8 rounded-lg border border-red-800 shadow-md shadow-red-950/40">
+            <table class="w-full text-xs">
+                <thead>
+                    <tr class="bg-red-700 text-white">
+                        <th class="px-3 py-2 text-left">Time</th>
+                        <th class="px-3 py-2 text-left">Patient</th>
+                        <th class="px-3 py-2 text-center">HR (BPM)</th>
+                        <th class="px-3 py-2 text-center">BP</th>
+                        <th class="px-3 py-2 text-center">SpO2</th>
+                        <th class="px-3 py-2 text-center">Temp</th>
+                        <th class="px-3 py-2 text-center">Tachycardia</th>
+                        <th class="px-3 py-2 text-center">Hypertrophy</th>
+                        <th class="px-3 py-2 text-center">High Cholesterol</th>
+                    </tr>
+                </thead>
+                <tbody id="readings-table" class="bg-gray-900 divide-y divide-gray-800">
+                    {% for reading in readings %}
+                        {% set is_dangerous = reading.tachycardia_pred == 1 or reading.hypertrophy_pred == 1 or reading.cholesterol_pred == 1 or reading.heart_rate > 120 or reading.systolic > 160 or reading.diastolic > 100 or reading.spo2 < 92 %}
+                        <tr class="{% if is_dangerous %}danger-row{% endif %} {% if reading.notification_sent == 1 %}notification-badge{% endif %} hover:bg-gray-800 transition-colors">
+                            <td class="px-3 py-2 text-gray-400 normal-case">{{ reading.timestamp }}</td>
+                            <td class="px-3 py-2 text-gray-200">{{ reading.patient_name }}</td>
+                            <td class="px-3 py-2 text-center font-bold {% if reading.heart_rate > 120 %}text-red-400{% else %}text-emerald-400{% endif %}">
+                                {{ reading.heart_rate }}
+                            </td>
+                            <td class="px-3 py-2 text-center {% if reading.systolic > 160 or reading.diastolic > 100 %}text-red-400 font-bold{% else %}text-gray-300{% endif %}">
+                                {{ reading.blood_pressure }}
+                            </td>
+                            <td class="px-3 py-2 text-center {% if reading.spo2 < 92 %}text-red-400 font-bold{% else %}text-gray-300{% endif %}">
+                                {{ reading.spo2 }}%
+                            </td>
+                            <td class="px-3 py-2 text-center text-gray-400 normal-case">{{ reading.body_temp }}°C</td>
+                            <td class="px-3 py-2 text-center">
+                                {% if reading.tachycardia_pred == 1 %}
+                                    <span class="inline-block bg-red-600 text-white px-2 py-0.5 rounded-full font-bold">Detected</span>
+                                {% else %}
+                                    <span class="inline-block bg-emerald-900 text-emerald-300 px-2 py-0.5 rounded-full">Normal</span>
+                                {% endif %}
+                                {% if reading.tachycardia_prob != none %}
+                                    <div class="text-gray-500 mt-0.5 normal-case">{{ (reading.tachycardia_prob * 100)|round|int }}%</div>
+                                {% endif %}
+                            </td>
+                            <td class="px-3 py-2 text-center">
+                                {% if reading.hypertrophy_pred == 1 %}
+                                    <span class="inline-block bg-red-600 text-white px-2 py-0.5 rounded-full font-bold">Detected</span>
+                                {% else %}
+                                    <span class="inline-block bg-emerald-900 text-emerald-300 px-2 py-0.5 rounded-full">Normal</span>
+                                {% endif %}
+                                {% if reading.hypertrophy_prob != none %}
+                                    <div class="text-gray-500 mt-0.5 normal-case">{{ (reading.hypertrophy_prob * 100)|round|int }}%</div>
+                                {% endif %}
+                            </td>
+                            <td class="px-3 py-2 text-center">
+                                {% if reading.cholesterol_pred == 1 %}
+                                    <span class="inline-block bg-red-600 text-white px-2 py-0.5 rounded-full font-bold">Detected</span>
+                                {% else %}
+                                    <span class="inline-block bg-emerald-900 text-emerald-300 px-2 py-0.5 rounded-full">Normal</span>
+                                {% endif %}
+                                {% if reading.cholesterol_prob != none %}
+                                    <div class="text-gray-500 mt-0.5 normal-case">{{ (reading.cholesterol_prob * 100)|round|int }}%</div>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% else %}
+                        <tr>
+                            <td colspan="9" class="px-4 py-10 text-center text-gray-600 normal-case">
+                                No readings yet &mdash; submit a reading below.
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- ── INPUT + PATIENT STATUS ─────────────────────────────── -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+
+            <!-- Input Vitals -->
+            <div class="bg-gray-900 border border-red-800 rounded-lg overflow-hidden shadow-md shadow-red-950/40">
+                <div class="bg-red-700 px-4 py-2">
+                    <span class="text-xs font-bold tracking-widest">Input Vitals</span>
+                </div>
+                <div class="p-5">
+                    <form action="/submit_reading" method="post" class="space-y-4">
+                        <div>
+                            <label for="patient_id" class="block text-xs text-gray-400 mb-1">Patient</label>
+                            <select class="w-full bg-gray-800 border border-red-800 text-white rounded px-3 py-2 text-sm focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-600 normal-case"
+                                    id="patient_id" name="patient_id" required>
+                                <option value="">-- Select Patient --</option>
+                                {% for patient in patients %}
+                                    <option value="{{ patient.id }}" {% if selected_patient and selected_patient.id == patient.id %}selected{% endif %}>
+                                        {{ patient.name }} ({{ patient.age }}y, {{ patient.gender }})
+                                    </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div>
+                            <label for="heart_rate" class="block text-xs text-gray-400 mb-1">Heart Rate (BPM)</label>
+                            <input type="number"
+                                   class="w-full bg-gray-800 border border-red-800 text-white rounded px-3 py-2 text-sm focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-600 normal-case"
+                                   id="heart_rate" name="heart_rate" min="30" max="220" placeholder="e.g. 72" required>
+                        </div>
+                        <button type="submit"
+                                class="w-full bg-red-600 hover:bg-red-700 active:bg-red-800 text-white font-bold py-2 px-4 rounded transition-colors shadow shadow-red-900/40">
+                            Submit Clinical Reading
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Patient Status -->
+            <div>
+                {% if selected_patient %}
+                    <div class="bg-gray-900 border border-red-800 rounded-lg overflow-hidden shadow-md shadow-red-950/40 h-full">
+                        <div class="bg-red-700 px-4 py-2">
+                            <span class="text-xs font-bold tracking-widest">Patient Status</span>
+                        </div>
+                        <div class="p-5 flex flex-col gap-2">
+                            <h4 class="text-base font-bold text-red-400">{{ selected_patient.name }}</h4>
+                            <p class="text-xs"><span class="text-gray-500">Age:</span> <span class="text-gray-200 normal-case">{{ selected_patient.age }} years</span></p>
+                            <p class="text-xs"><span class="text-gray-500">Gender:</span> <span class="text-gray-200 normal-case">{{ selected_patient.gender }}</span></p>
+                            {% if selected_patient.medical_history %}
+                                <p class="text-xs"><span class="text-gray-500">History:</span> <span class="text-gray-200 normal-case">{{ selected_patient.medical_history }}</span></p>
+                            {% endif %}
+                            <div class="mt-2">
+                                <p class="text-xs text-gray-500 mb-1">Caregivers</p>
+                                {% if selected_patient.caregivers %}
+                                    <ul class="space-y-1">
+                                        {% for cg in selected_patient.caregivers %}
+                                            <li class="text-xs normal-case">
+                                                <span class="text-red-400">{{ cg.name }}</span>
+                                                <span class="text-gray-500">({{ cg.relationship }})</span>
+                                                &mdash; {{ cg.email }}
+                                            </li>
+                                        {% endfor %}
+                                    </ul>
+                                {% else %}
+                                    <p class="text-xs text-gray-600 normal-case">No caregivers assigned</p>
+                                {% endif %}
+                            </div>
+                            <a href="/patients/{{ selected_patient.id }}"
+                               class="mt-3 inline-block text-center bg-red-600 hover:bg-red-700 text-white font-bold text-xs py-2 px-4 rounded transition-colors">
+                                Full Details
+                            </a>
+                        </div>
+                    </div>
+                {% else %}
+                    <div class="bg-red-950/30 border border-red-900 rounded-lg p-5 text-red-400 text-xs normal-case">
+                        Select a patient to view clinical status.
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- Alert Chat Button -->
+    <button id="toggle-chat"
+            class="fixed bottom-5 right-5 bg-red-600 hover:bg-red-700 text-white font-bold text-xs py-2 px-5 rounded-full shadow-lg shadow-red-900/50 z-50 transition-colors">
+        Alert Chat
+    </button>
+
+    <!-- Chat Widget -->
+    <div id="chat-container"
+         class="fixed bottom-16 right-5 w-80 bg-gray-900 border border-red-700 rounded-lg shadow-2xl shadow-red-900/30 z-50 hidden">
+        <div class="bg-red-700 px-4 py-2 flex justify-between items-center rounded-t-lg">
+            <span class="text-xs font-bold tracking-widest">Emergency Chat</span>
+            <button id="close-chat" class="text-white hover:text-red-200 text-xl leading-none">&times;</button>
+        </div>
+        <div id="chat-body" class="p-3 h-56 overflow-y-auto space-y-2">
+            <div class="bg-red-950 rounded p-2 text-xs normal-case">
+                <span class="text-red-400 font-bold">Dr. Smith:</span> HR 130 BPM detected. Immediate intervention needed!
+            </div>
+            <div class="bg-gray-800 rounded p-2 text-xs text-right normal-case">
+                <span class="text-gray-400 font-bold">You:</span> Calling EMS now.
+            </div>
+        </div>
+        <div class="p-3 border-t border-red-900">
+            <div class="flex gap-2">
+                <input type="text" id="chat-input" placeholder="Send alert..."
+                       class="flex-1 bg-gray-800 border border-red-800 text-white text-xs rounded px-3 py-2 focus:outline-none focus:border-red-500 normal-case">
+                <button id="send-message"
+                        class="bg-red-600 hover:bg-red-700 text-white text-xs font-bold px-3 py-2 rounded transition-colors">
+                    Send
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Mobile nav toggle
+        document.getElementById('mobile-menu-btn').addEventListener('click', () => {
+            const m = document.getElementById('mobile-menu');
+            m.classList.toggle('hidden');
+            m.classList.toggle('flex');
+        });
+
+        // ── Charts ──────────────────────────────────────────────────
+        const gridColor  = 'rgba(239,68,68,0.12)';
+        const tickFont   = { family: 'Courier New', size: 10 };
+        const legendFont = { family: 'Courier New', size: 10 };
+
+        // Normal-range annotation band factory
+        function normalBand(yMin, yMax, label, color = 'rgba(16,185,129,0.25)', border = 'rgba(16,185,129,0.55)') {
+            return {
+                type: 'box',
+                yMin, yMax,
+                backgroundColor: color,
+                borderColor: border,
+                borderWidth: 1,
+                borderDash: [4, 3],
+                label: {
+                    display: true,
+                    content: label,
+                    color: 'rgba(16,185,129,0.75)',
+                    font: { size: 9, family: 'Courier New' },
+                    position: { x: 'start', y: 'start' }
+                }
+            };
+        }
+
+        function makeScales(yMin, yMax) {
+            return {
+                y: {
+                    beginAtZero: false,
+                    suggestedMin: yMin,
+                    suggestedMax: yMax,
+                    grid: { color: gridColor },
+                    ticks: { color: '#9ca3af', font: tickFont }
+                },
+                x: {
+                    grid: { color: gridColor },
+                    ticks: { color: '#9ca3af', maxRotation: 45, font: tickFont }
+                }
+            };
+        }
+
+        const baseOpts = {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: { duration: 700, easing: 'easeOutQuart' },
+            plugins: {
+                legend: { labels: { color: '#d1d5db', font: legendFont } }
+            }
+        };
+
+        // ── 1. Heart Rate ────────────────────────────────────────────
+        const heartRateChart = new Chart(document.getElementById('heartRateChart').getContext('2d'), {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'HR (BPM)',
+                    data: [],
+                    borderColor: '#ef4444',
+                    backgroundColor: 'rgba(239,68,68,0.10)',
+                    fill: true,
+                    tension: 0.3,
+                    pointBackgroundColor: '#ef4444',
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
+                    order: 1
+                }]
+            },
+            options: {
+                ...baseOpts,
+                scales: makeScales(30, 220),
+                plugins: {
+                    ...baseOpts.plugins,
+                    annotation: {
+                        annotations: {
+                            normal: normalBand(60, 100, 'Normal  60–100 BPM')
+                        }
+                    }
+                }
+            }
+        });
+
+        // ── 2. Blood Pressure ────────────────────────────────────────
+        const bpChart = new Chart(document.getElementById('bpChart').getContext('2d'), {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    {
+                        label: 'Systolic',
+                        data: [],
+                        borderColor: '#ef4444',
+                        backgroundColor: 'rgba(239,68,68,0.10)',
+                        tension: 0.3,
+                        pointBackgroundColor: '#ef4444',
+                        pointRadius: 4,
+                        order: 1
+                    },
+                    {
+                        label: 'Diastolic',
+                        data: [],
+                        borderColor: '#fb923c',
+                        backgroundColor: 'rgba(251,146,60,0.08)',
+                        tension: 0.3,
+                        pointBackgroundColor: '#fb923c',
+                        pointRadius: 4,
+                        order: 2
+                    }
+                ]
+            },
+            options: {
+                ...baseOpts,
+                scales: makeScales(40, 200),
+                plugins: {
+                    ...baseOpts.plugins,
+                    annotation: {
+                        annotations: {
+                            systolicNormal:  normalBand(90, 120, 'Normal Systolic  90–120'),
+                            diastolicNormal: normalBand(60, 80,  'Normal Diastolic 60–80',
+                                                        'rgba(59,130,246,0.12)', 'rgba(59,130,246,0.45)')
+                        }
+                    }
+                }
+            }
+        });
+
+        // ── 3. SpO2 ──────────────────────────────────────────────────
+        const spo2Chart = new Chart(document.getElementById('spo2Chart').getContext('2d'), {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'SpO2 (%)',
+                    data: [],
+                    borderColor: '#22d3ee',
+                    backgroundColor: 'rgba(34,211,238,0.10)',
+                    fill: true,
+                    tension: 0.3,
+                    pointBackgroundColor: '#22d3ee',
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
+                    order: 1
+                }]
+            },
+            options: {
+                ...baseOpts,
+                scales: makeScales(85, 101),
+                plugins: {
+                    ...baseOpts.plugins,
+                    annotation: {
+                        annotations: {
+                            normal:   normalBand(95, 100, 'Normal  95–100%'),
+                            critical: normalBand(85, 92,  'Critical  <92%',
+                                                 'rgba(239,68,68,0.08)', 'rgba(239,68,68,0.40)')
+                        }
+                    }
+                }
+            }
+        });
+
+        // ── 4. Body Temperature ──────────────────────────────────────
+        const tempChart = new Chart(document.getElementById('tempChart').getContext('2d'), {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Temp (°C)',
+                    data: [],
+                    borderColor: '#f59e0b',
+                    backgroundColor: 'rgba(245,158,11,0.10)',
+                    fill: true,
+                    tension: 0.3,
+                    pointBackgroundColor: '#f59e0b',
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
+                    order: 1
+                }]
+            },
+            options: {
+                ...baseOpts,
+                scales: makeScales(35, 40.5),
+                plugins: {
+                    ...baseOpts.plugins,
+                    annotation: {
+                        annotations: {
+                            normal: normalBand(36.1, 37.2, 'Normal  36.1–37.2°C')
+                        }
+                    }
+                }
+            }
+        });
+
+        // ── Auto-refresh ─────────────────────────────────────────────
+        let refreshInterval = 10, currentTimer = 10, timerInterval;
+        const nextRefreshEl = document.getElementById('nextRefresh');
+        const autoRefreshToggle = document.getElementById('autoRefreshToggle');
+
+        function tick() {
+            currentTimer--;
+            if (currentTimer <= 0) { refreshReadings(); currentTimer = refreshInterval; }
+            nextRefreshEl.textContent = `Next refresh in: ${currentTimer}s`;
+            nextRefreshEl.classList.toggle('text-red-500', currentTimer <= 3);
+            nextRefreshEl.classList.toggle('font-bold', currentTimer <= 3);
+        }
+
+        timerInterval = setInterval(tick, 1000);
+
+        autoRefreshToggle.addEventListener('change', function () {
+            if (this.checked) {
+                currentTimer = refreshInterval;
+                timerInterval = setInterval(tick, 1000);
+                nextRefreshEl.style.display = 'inline';
+                nextRefreshEl.classList.add('pulse');
+            } else {
+                clearInterval(timerInterval);
+                nextRefreshEl.style.display = 'none';
+                nextRefreshEl.classList.remove('pulse');
+            }
+        });
+
+        document.querySelectorAll('.refresh-chart').forEach(btn => {
+            btn.addEventListener('click', function () {
+                this.style.transition = 'transform 0.5s';
+                this.style.transform = 'rotate(360deg)';
+                setTimeout(() => { this.style.transition = ''; this.style.transform = ''; }, 600);
+                refreshReadings(this.dataset.chart);
+                if (autoRefreshToggle.checked) currentTimer = refreshInterval;
+            });
+        });
+
+        // ── Fetch & update ───────────────────────────────────────────
+        function refreshReadings(specific = null) {
+            const pid = document.getElementById('patient_id').value;
+            fetch(`/api/data${pid ? '?patient_id=' + pid : ''}`)
+                .then(r => r.json())
+                .then(data => {
+                    // Always refresh the individual chart that was clicked;
+                    // on full refresh (no specific) update everything.
+                    if (!specific || specific === 'all') {
+                        updateTable(data);
+                        updateHeartRateChart(data);
+                        updateBPChart(data);
+                        updateSpo2Chart(data);
+                        updateTempChart(data);
+                        updatePredictionsSummary(data);
+                    } else if (specific === 'heartRate') {
+                        updateHeartRateChart(data);
+                    } else if (specific === 'bp') {
+                        updateBPChart(data);
+                    } else if (specific === 'spo2') {
+                        updateSpo2Chart(data);
+                    } else if (specific === 'temp') {
+                        updateTempChart(data);
+                    }
+                })
+                .catch(() => {
+                    const div = document.createElement('div');
+                    div.className = 'fixed bottom-4 left-4 bg-red-900 border border-red-600 text-red-200 px-4 py-3 rounded z-50 text-xs';
+                    div.textContent = 'Connection error — unable to refresh data.';
+                    document.body.appendChild(div);
+                    setTimeout(() => div.remove(), 5000);
+                });
+        }
+
+        // ── Prediction badge helper ──────────────────────────────────
+        function predBadge(pred, prob) {
+            const pct = (prob !== null && prob !== undefined)
+                ? `<div class="text-gray-500 mt-0.5" style="text-transform:none">${Math.round(prob * 100)}%</div>`
+                : '';
+            if (pred == 1) {
+                return `<span class="inline-block bg-red-600 text-white px-2 py-0.5 rounded-full font-bold">Detected</span>${pct}`;
+            }
+            return `<span class="inline-block bg-emerald-900 text-emerald-300 px-2 py-0.5 rounded-full">Normal</span>${pct}`;
+        }
+
+        // ── Update table ─────────────────────────────────────────────
+        function updateTable(data) {
+            const tbody = document.getElementById('readings-table');
+            const readings = [...data.readings].reverse();
+
+            if (!readings.length) {
+                tbody.innerHTML = `<tr><td colspan="9" class="px-4 py-10 text-center text-gray-600" style="text-transform:none">No readings yet.</td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = readings.map(r => {
+                const danger = r.tachycardia_pred == 1 || r.hypertrophy_pred == 1 || r.cholesterol_pred == 1
+                             || r.heart_rate > 120 || r.systolic > 160 || r.diastolic > 100 || r.spo2 < 92;
+                return `
+                <tr class="${danger ? 'danger-row' : ''} ${r.notification_sent == 1 ? 'notification-badge' : ''} hover:bg-gray-800 transition-colors divide-x divide-gray-800">
+                    <td class="px-3 py-2 text-gray-400" style="text-transform:none;font-size:0.7rem">${r.timestamp}</td>
+                    <td class="px-3 py-2 text-gray-200" style="font-size:0.75rem">${r.patient_name}</td>
+                    <td class="px-3 py-2 text-center font-bold ${r.heart_rate > 120 ? 'text-red-400' : 'text-emerald-400'}">${r.heart_rate}</td>
+                    <td class="px-3 py-2 text-center ${(r.systolic > 160 || r.diastolic > 100) ? 'text-red-400 font-bold' : 'text-gray-300'}">${r.blood_pressure}</td>
+                    <td class="px-3 py-2 text-center ${r.spo2 < 92 ? 'text-red-400 font-bold' : 'text-gray-300'}">${r.spo2}%</td>
+                    <td class="px-3 py-2 text-center text-gray-400" style="text-transform:none">${r.body_temp}°C</td>
+                    <td class="px-3 py-2 text-center">${predBadge(r.tachycardia_pred, r.tachycardia_prob)}</td>
+                    <td class="px-3 py-2 text-center">${predBadge(r.hypertrophy_pred, r.hypertrophy_prob)}</td>
+                    <td class="px-3 py-2 text-center">${predBadge(r.cholesterol_pred, r.cholesterol_prob)}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        // ── Update ML Predictions Summary cards ──────────────────────
+        function updatePredictionsSummary(data) {
+            if (!data.readings || !data.readings.length) return;
+            const latest = data.readings[0];
+
+            function setCard(badgeId, probId, pred, prob) {
+                const badge = document.getElementById(badgeId);
+                const probEl = document.getElementById(probId);
+                if (pred == 1) {
+                    badge.className = 'px-5 py-2 rounded-full text-xs font-bold bg-red-600 text-white animate-pulse';
+                    badge.textContent = 'Detected';
+                } else {
+                    badge.className = 'px-5 py-2 rounded-full text-xs font-bold bg-emerald-900 text-emerald-300';
+                    badge.textContent = 'Normal';
+                }
+                probEl.textContent = (prob !== null && prob !== undefined)
+                    ? `Confidence: ${Math.round(prob * 100)}%`
+                    : '';
+            }
+
+            setCard('tachycardia-badge', 'tachycardia-prob', latest.tachycardia_pred, latest.tachycardia_prob);
+            setCard('hypertrophy-badge', 'hypertrophy-prob', latest.hypertrophy_pred, latest.hypertrophy_prob);
+            setCard('cholesterol-badge', 'cholesterol-prob', latest.cholesterol_pred, latest.cholesterol_prob);
+        }
+
+        // ── Chart update helpers ─────────────────────────────────────
+        function updateHeartRateChart(data) {
+            heartRateChart.data.labels = data.readings.map(r => r.timestamp.split(' ')[1]);
+            heartRateChart.data.datasets[0].data = data.readings.map(r => r.heart_rate);
+            heartRateChart.update();
+        }
+
+        function updateBPChart(data) {
+            bpChart.data.labels = data.readings.map(r => r.timestamp.split(' ')[1]);
+            bpChart.data.datasets[0].data = data.readings.map(r => r.systolic);
+            bpChart.data.datasets[1].data = data.readings.map(r => r.diastolic);
+            bpChart.update();
+        }
+
+        function updateSpo2Chart(data) {
+            spo2Chart.data.labels = data.readings.map(r => r.timestamp.split(' ')[1]);
+            spo2Chart.data.datasets[0].data = data.readings.map(r => r.spo2);
+            spo2Chart.update();
+        }
+
+        function updateTempChart(data) {
+            tempChart.data.labels = data.readings.map(r => r.timestamp.split(' ')[1]);
+            tempChart.data.datasets[0].data = data.readings.map(r => r.body_temp);
+            tempChart.update();
+        }
+
+        // Initial load
+        refreshReadings();
+
+        // ── Chat ─────────────────────────────────────────────────────
+        const chatContainer = document.getElementById('chat-container');
+        document.getElementById('toggle-chat').addEventListener('click', () => chatContainer.classList.toggle('hidden'));
+        document.getElementById('close-chat').addEventListener('click', () => chatContainer.classList.add('hidden'));
+
+        function sendMessage() {
+            const chatInput = document.getElementById('chat-input');
+            const chatBody = document.getElementById('chat-body');
+            const msg = chatInput.value.trim();
+            if (!msg) return;
+            const sent = document.createElement('div');
+            sent.className = 'bg-gray-800 rounded p-2 text-xs text-right';
+            sent.style.textTransform = 'none';
+            sent.innerHTML = `<span class="text-gray-400 font-bold">You:</span> ${msg}`;
+            chatBody.appendChild(sent);
+            chatInput.value = '';
+            chatBody.scrollTop = chatBody.scrollHeight;
+            setTimeout(() => {
+                const recv = document.createElement('div');
+                recv.className = 'bg-red-950 rounded p-2 text-xs';
+                recv.style.textTransform = 'none';
+                recv.innerHTML = `<span class="text-red-400 font-bold">Dr. Smith:</span> Alert received. Status update?`;
+                chatBody.appendChild(recv);
+                chatBody.scrollTop = chatBody.scrollHeight;
+            }, 1000);
+        }
+
+        document.getElementById('send-message').addEventListener('click', sendMessage);
+        document.getElementById('chat-input').addEventListener('keypress', e => { if (e.key === 'Enter') sendMessage(); });
+    </script>
+</body>
+</html>
